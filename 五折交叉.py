@@ -11,10 +11,11 @@ print(f"Ultralytics 版本: {ultralytics.__version__}")  # 确认版本
 # ────────────────────────────────────────────────
 # 全局配置
 # ────────────────────────────────────────────────
-DATA_ROOT = r"C:\Users\zheng\Desktop\disea"
+AUG_DIR = r"C:\Users\zheng\Desktop\labels_aug"          # 混合图片+标签目录
 
-# 使用官方 YOLO26s（自动下载最新版）
-MODEL = "yolo26s.pt"   # Ultralytics 会自动从 https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26s.pt 下载
+DATA_ROOT = AUG_DIR                                     # yaml里用的path
+
+MODEL = r"C:\LEOWork\Pycharm\Projects\yolo\model\yolo26s.pt"
 
 IMG_SIZE = 640
 BATCH = 8
@@ -23,52 +24,82 @@ FOLDS = 5
 SEED = 42
 DEVICE = "0"
 
-OUTPUT_DIR = os.path.join(DATA_ROOT, "kfold_results")
-FOLDS_YAML_DIR = os.path.join(DATA_ROOT, "folds_yaml")
+OUTPUT_DIR = os.path.join(AUG_DIR, "kfold_results")
+FOLDS_YAML_DIR = os.path.join(AUG_DIR, "folds_yaml")
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(FOLDS_YAML_DIR, exist_ok=True)
 
 CLASS_NAMES = [
-    "Black rot of tea",
-    "Brown blight of tea",
-    "Leaf rust of tea",
-    "Red Spider infested tea leaf",
-    "Tea Mosquito bug infested leaf",
-    "Tea leaf",
-    "White spot of tea"
+    'algal leaf',
+    'Anthracnose',
+    'bird eye spot',
+    'brown blight',
+    'gray light',
+    'healthy',
+    'red leaf spot',
+    'white spot'
 ]
 NC = len(CLASS_NAMES)
 # ────────────────────────────────────────────────
 
 
 def collect_images_per_class():
+    """
+    从同一个文件夹读取所有图片 + txt
+    根据标签文件**第一行**的类别编号来分类（因为你说每个图片只有一个标签）
+    """
     class_images = defaultdict(list)
+    img_dir = AUG_DIR
+    lbl_dir = AUG_DIR
 
-    for cls_id in range(NC):
-        cls_dir = os.path.join(DATA_ROOT, str(cls_id))
-        img_dir = os.path.join(cls_dir, "images")
-        lbl_dir = os.path.join(cls_dir, "labels")
+    if not os.path.isdir(img_dir):
+        print(f"错误：目录不存在 → {img_dir}")
+        return class_images
 
-        if not os.path.isdir(img_dir):
-            print(f"警告：类别 {cls_id} 目录不存在 → {img_dir}")
+    for img_name in sorted(os.listdir(img_dir)):
+        if not img_name.lower().endswith(('.jpg', '.jpeg', '.png')):
             continue
 
-        for img_name in sorted(os.listdir(img_dir)):
-            if not img_name.lower().endswith(('.jpg', '.jpeg', '.png')):
-                continue
-            stem = Path(img_name).stem
-            label_path = os.path.join(lbl_dir, stem + ".txt")
-            if os.path.isfile(label_path):
-                class_images[cls_id].append(img_name)
-            else:
-                print(f"跳过无标签样本：{cls_id}/images/{img_name}")
+        stem = Path(img_name).stem
+        label_path = os.path.join(lbl_dir, stem + ".txt")
 
-    # 打印数量分布
+        if not os.path.isfile(label_path):
+            print(f"跳过无标签：{img_name}")
+            continue
+
+        try:
+            with open(label_path, 'r', encoding='utf-8') as f:
+                lines = [line.strip() for line in f if line.strip()]
+
+            if not lines:
+                print(f"空标签文件，跳过：{img_name}")
+                continue
+
+            # 只看第一行，获取类别id
+            first_class_str = lines[0].split()[0]
+            cls_id = int(first_class_str)
+
+            if not (0 <= cls_id < NC):
+                print(f"类别编号 {cls_id} 非法（应为0~{NC-1}），跳过：{img_name}")
+                continue
+
+            class_images[cls_id].append(img_name)
+
+        except (ValueError, IndexError) as e:
+            print(f"标签格式错误 {label_path}：{e} → 跳过 {img_name}")
+        except Exception as e:
+            print(f"读取标签失败 {label_path}：{e} → 跳过")
+
+    # 打印分布
     total = 0
-    for cls_id, imgs in sorted(class_images.items()):
-        print(f"类别 {cls_id} ({CLASS_NAMES[cls_id]}): {len(imgs)} 张")
-        total += len(imgs)
+    print("\n类别分布：")
+    print("-" * 60)
+    for cls_id in range(NC):
+        cnt = len(class_images[cls_id])
+        print(f"  {cls_id:2d} | {CLASS_NAMES[cls_id]:<18} | {cnt:5d} 张")
+        total += cnt
+    print("-" * 60)
     print(f"总有效样本数：{total}\n")
 
     return class_images
@@ -117,48 +148,55 @@ def create_fold_yaml(fold_idx, train_paths, val_paths):
     with open(yaml_path, "w", encoding="utf-8") as f:
         yaml.dump(yaml_dict, f, allow_unicode=True, sort_keys=False)
 
-    print(f"  已生成 yaml: {yaml_path}")
+    print(f"  已生成: {yaml_path}")
     return yaml_path
 
 
 def main():
-    print("正在收集每类图片...")
+    print("正在扫描并按类别统计图片（基于标签第一行）...")
     class_images = collect_images_per_class()
 
-    print(f"开始 {FOLDS}-fold 分层划分...")
+    if sum(len(v) for v in class_images.values()) == 0:
+        print("没有找到任何有效带标签的图片，程序退出。")
+        return
+
+    print(f"开始 {FOLDS}-fold 分层交叉验证划分...")
     fold_val_imgnames = stratified_kfold_split(class_images, FOLDS, SEED)
 
-    # name → full path 映射
+    # 图片名 → 完整路径
     name_to_path = {}
-    for cls_id in range(NC):
-        cls_img_dir = os.path.join(DATA_ROOT, str(cls_id), "images")
-        for name in class_images[cls_id]:
-            name_to_path[name] = os.path.join(cls_img_dir, name)
+    for img_name in os.listdir(AUG_DIR):
+        if img_name.lower().endswith(('.jpg', '.jpeg', '.png')):
+            name_to_path[img_name] = os.path.join(AUG_DIR, img_name)
 
     fold_results = []
 
     for fold_idx in range(FOLDS):
-        print(f"\n━━━━━━━━━━ Fold {fold_idx+1}/{FOLDS} ━━━━━━━━━━")
+        print(f"\n━━━━━━━━━━ Fold {fold_idx+1} / {FOLDS} ━━━━━━━━━━")
 
         val_names = set(fold_val_imgnames[fold_idx])
-        val_paths = [name_to_path[name] for name in val_names if name in name_to_path]
+        val_paths = [name_to_path.get(name) for name in val_names if name in name_to_path]
+        val_paths = [p for p in val_paths if p is not None]
+
         train_paths = [p for name, p in name_to_path.items() if name not in val_names]
 
-        print(f"  训练集: {len(train_paths)} 张")
-        print(f"  验证集: {len(val_paths)} 张")
+        print(f"  训练集样本数: {len(train_paths):5d}")
+        print(f"  验证集样本数: {len(val_paths):5d}")
+
+        if len(val_paths) == 0 or len(train_paths) == 0:
+            print("  该折数据集为空，跳过训练")
+            continue
 
         yaml_path = create_fold_yaml(fold_idx, train_paths, val_paths)
 
-        # 加载 YOLO26s
         try:
-            model = YOLO(MODEL)  # 自动下载官方 yolo26s.pt 如果本地没有
+            model = YOLO(MODEL)
             print("模型加载成功")
         except Exception as e:
             print(f"模型加载失败: {e}")
-            print("请运行: pip install -U ultralytics")
+            print("建议：pip install -U ultralytics")
             continue
 
-        # 训练
         try:
             results = model.train(
                 data=yaml_path,
@@ -197,17 +235,18 @@ def main():
                 "mAP": metrics.get("metrics/mAP50-95(B)", 0),
             })
 
-            print(f"  Fold {fold_idx+1} 完成    mAP50: {metrics.get('metrics/mAP50(B)', 0):.4f}   mAP: {metrics.get('metrics/mAP50-95(B)', 0):.4f}")
+            print(f"  Fold {fold_idx+1} 完成    mAP50: {metrics.get('metrics/mAP50(B)', 0):.4f}"
+                  f"   mAP50-95: {metrics.get('metrics/mAP50-95(B)', 0):.4f}")
 
         except Exception as e:
-            print(f"  Fold {fold_idx+1} 训练失败！{e}")
+            print(f"  Fold {fold_idx+1} 训练失败：{e}")
             continue
 
-    # 汇总
+    # ── 汇总 ────────────────────────────────────────
     if fold_results:
-        print("\n" + "═" * 50)
-        print("5-Fold 交叉验证汇总结果 (YOLO26s)")
-        print("═" * 50)
+        print("\n" + "═" * 60)
+        print("5-Fold 交叉验证结果汇总 (YOLO26s)")
+        print("═" * 60)
 
         avg_map50 = sum(r["mAP50"] for r in fold_results) / len(fold_results)
         avg_map   = sum(r["mAP"]   for r in fold_results) / len(fold_results)
@@ -218,9 +257,9 @@ def main():
         for r in sorted(fold_results, key=lambda x: x["fold"]):
             print(f"Fold {r['fold']:2d} : mAP50 = {r['mAP50']:.4f} | mAP = {r['mAP']:.4f}")
 
-        print(f"\n结果保存于: {OUTPUT_DIR}")
+        print(f"\n所有权重/结果保存在: {OUTPUT_DIR}")
     else:
-        print("所有折训练失败，请检查日志")
+        print("所有折均训练失败，请检查上面日志")
 
 
 if __name__ == '__main__':
